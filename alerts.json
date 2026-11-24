@@ -1,8 +1,11 @@
 {
-  "rules": [
-    { "id": "btc-24h-move", "coin": "bitcoin", "symbol": "BTC", "type": "change24h", "threshold": 7, "cooldownMinutes": 360, "enabled": true },
-    { "id": "eth-24h-move", "coin": "ethereum", "symbol": "ETH", "type": "change24h", "threshold": 7, "cooldownMinutes": 360, "enabled": true },
-    { "id": "btc-above", "coin": "bitcoin", "symbol": "BTC", "type": "above", "threshold": 150000, "cooldownMinutes": 720, "enabled": false },
-    { "id": "btc-below", "coin": "bitcoin", "symbol": "BTC", "type": "below", "threshold": 60000, "cooldownMinutes": 720, "enabled": false }
+  "settings": {
+    "cooldownHours": 8,
+    "callsPerAlert": 2
+  },
+  "coins": [
+    { "id": "bitcoin", "name": "Bitcoin", "symbol": "BTC", "threshold": 60000, "delta": 2000, "enabled": true },
+    { "id": "ethereum", "name": "Ethereum", "symbol": "ETH", "threshold": null, "delta": null, "enabled": false },
+    { "id": "solana", "name": "Solana", "symbol": "SOL", "threshold": null, "delta": null, "enabled": false }
   ]
 }

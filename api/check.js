@@ -1,64 +1,76 @@
 // alert-system api/check.js
-// Version: 1.1
-// Checks crypto prices against alerts.json and places a Twilio voice call that reads the alert.
-// Called by Vercel Cron every 5 minutes (see vercel.json).
+// Version: 2.0
+// Runs every 5 minutes (Vercel Cron, see vercel.json).
+// For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
+// through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
+// Each level alerts at most once per cooldownHours. The last price and the last alert time of each
+// level are kept in a Twilio Sync document (default Sync service), so no extra database is needed.
 //
 // Required env vars:
 //   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, ALERT_TO_NUMBER, CRON_SECRET
-// Add ?dry=1 to the URL to evaluate rules without placing a call.
-// Cooldown is shared: if any call to ALERT_TO_NUMBER happened within the shortest cooldown
-// of the rules that fired, no new call is placed. Rules that fire together share one call.
+// Add ?dry=1 to the URL to evaluate without placing calls or saving state.
 
 const config = require('../alerts.json');
 
-async function getPrices(coinIds) {
+const SYNC_URL = 'https://sync.twilio.com/v1/Services/default/Documents';
+const STATE_NAME = 'alert-state';
+const API = 'https://api.twilio.com/2010-04-01/Accounts/';
+
+function authHeader() {
+  const token = Buffer.from(process.env.TWILIO_ACCOUNT_SID + ':' + process.env.TWILIO_AUTH_TOKEN).toString('base64');
+  return { Authorization: 'Basic ' + token };
+}
+
+function formHeaders() {
+  return Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded' }, authHeader());
+}
+
+function sleep(ms) {
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+async function getPrices(ids) {
   const url = 'https://api.coingecko.com/api/v3/simple/price?ids=' +
-    encodeURIComponent(coinIds.join(',')) +
-    '&vs_currencies=usd&include_24hr_change=true';
+    encodeURIComponent(ids.join(',')) + '&vs_currencies=usd';
   const res = await fetch(url, { headers: { accept: 'application/json' } });
   if (!res.ok) throw new Error('Price API error ' + res.status);
   return res.json();
 }
 
-function evaluate(rule, data) {
-  if (!data) return null;
-  const price = data.usd;
-  const change = data.usd_24h_change;
-  if (rule.type === 'above' && price >= rule.threshold) {
-    return rule.symbol + ' is above ' + rule.threshold + ' USD (now ' + price.toFixed(2) + ').';
-  }
-  if (rule.type === 'below' && price <= rule.threshold) {
-    return rule.symbol + ' is below ' + rule.threshold + ' USD (now ' + price.toFixed(2) + ').';
-  }
-  if (rule.type === 'change24h' && typeof change === 'number' && Math.abs(change) >= rule.threshold) {
-    const dir = change > 0 ? 'up' : 'down';
-    return rule.symbol + ' is ' + dir + ' ' + Math.abs(change).toFixed(1) + '% in 24h (now ' + price.toFixed(2) + ' USD).';
-  }
-  return null;
-}
-
-function twilioHeaders() {
-  const token = Buffer.from(process.env.TWILIO_ACCOUNT_SID + ':' + process.env.TWILIO_AUTH_TOKEN).toString('base64');
-  return { Authorization: 'Basic ' + token };
-}
-
-// Stateless cooldown: look at recent calls already placed through Twilio.
-async function recentlyCalled(cooldownMinutes) {
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const params = new URLSearchParams({
-    To: process.env.ALERT_TO_NUMBER,
-    From: process.env.TWILIO_FROM_NUMBER,
-    PageSize: '50'
-  });
-  params.set('StartTime>', new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 10));
-  const url = 'https://api.twilio.com/2010-04-01/Accounts/' + sid + '/Calls.json?' + params.toString();
-  const res = await fetch(url, { headers: twilioHeaders() });
-  if (!res.ok) throw new Error('Twilio history error ' + res.status);
+async function loadState() {
+  const res = await fetch(SYNC_URL + '/' + STATE_NAME, { headers: authHeader() });
+  if (res.status === 404) return { exists: false, data: { coins: {} } };
+  if (!res.ok) throw new Error('State read error ' + res.status + ' ' + (await res.text()));
   const body = await res.json();
-  const cutoff = Date.now() - cooldownMinutes * 60 * 1000;
-  return (body.calls || []).some(function (c) {
-    return Date.parse(c.date_created) >= cutoff;
-  });
+  const data = body.data && body.data.coins ? body.data : { coins: {} };
+  return { exists: true, data: data };
+}
+
+async function saveState(holder) {
+  const body = new URLSearchParams({ Data: JSON.stringify(holder.data) });
+  let res;
+  if (holder.exists) {
+    res = await fetch(SYNC_URL + '/' + STATE_NAME, { method: 'POST', headers: formHeaders(), body: body.toString() });
+  } else {
+    body.set('UniqueName', STATE_NAME);
+    res = await fetch(SYNC_URL, { method: 'POST', headers: formHeaders(), body: body.toString() });
+  }
+  if (!res.ok) throw new Error('State write error ' + res.status + ' ' + (await res.text()));
+  holder.exists = true;
+}
+
+// Levels that the price crossed downward since the previous check.
+function crossedLevels(coin, prev, price) {
+  const out = [];
+  for (let n = 0; coin.threshold - n * coin.delta > 0 && n < 2000; n++) {
+    const level = coin.threshold - n * coin.delta;
+    if (prev >= level && price < level) out.push(level);
+  }
+  return out;
+}
+
+function fmt(n) {
+  return Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
 
 function escapeXml(t) {
@@ -66,11 +78,11 @@ function escapeXml(t) {
 }
 
 async function placeCall(text) {
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const twiml = '<Response><Say voice="alice">Crypto alert. ' + escapeXml(text) + '</Say><Pause length="1"/><Say voice="alice">' + escapeXml(text) + '</Say></Response>';
-  const res = await fetch('https://api.twilio.com/2010-04-01/Accounts/' + sid + '/Calls.json', {
+  const say = escapeXml(text);
+  const twiml = '<Response><Say voice="alice">Crypto alert. ' + say + '</Say><Pause length="1"/><Say voice="alice">' + say + '</Say></Response>';
+  const res = await fetch(API + process.env.TWILIO_ACCOUNT_SID + '/Calls.json', {
     method: 'POST',
-    headers: Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded' }, twilioHeaders()),
+    headers: formHeaders(),
     body: new URLSearchParams({
       To: process.env.ALERT_TO_NUMBER,
       From: process.env.TWILIO_FROM_NUMBER,
@@ -78,6 +90,19 @@ async function placeCall(text) {
     }).toString()
   });
   if (!res.ok) throw new Error('Twilio call error ' + res.status + ' ' + (await res.text()));
+  return (await res.json()).sid;
+}
+
+// Wait (up to about 50 seconds) until the call has ended, so the second call does not collide with the first.
+async function waitForCall(callSid) {
+  const done = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
+  for (let i = 0; i < 12; i++) {
+    await sleep(4000);
+    const res = await fetch(API + process.env.TWILIO_ACCOUNT_SID + '/Calls/' + callSid + '.json', { headers: authHeader() });
+    if (!res.ok) return;
+    const body = await res.json();
+    if (done.indexOf(body.status) !== -1) return;
+  }
 }
 
 module.exports = async function handler(req, res) {
@@ -88,35 +113,57 @@ module.exports = async function handler(req, res) {
   const dry = req.query && req.query.dry === '1';
   const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'ALERT_TO_NUMBER'];
   const missing = required.filter(function (k) { return !process.env[k]; });
-  if (!dry && missing.length) return res.status(500).json({ error: 'missing env vars', missing: missing });
+  if (missing.length) return res.status(500).json({ error: 'missing env vars', missing: missing });
 
   try {
-    const rules = config.rules.filter(function (r) { return r.enabled; });
-    const coins = Array.from(new Set(rules.map(function (r) { return r.coin; })));
-    const prices = coins.length ? await getPrices(coins) : {};
-    const results = [];
+    const cooldownMs = (config.settings.cooldownHours || 8) * 3600 * 1000;
+    const calls = config.settings.callsPerAlert || 2;
+    const coins = config.coins.filter(function (c) {
+      return c.enabled && typeof c.threshold === 'number' && typeof c.delta === 'number' && c.delta > 0;
+    });
+    if (!coins.length) return res.status(200).json({ ok: true, checked: 0 });
 
-    const fired = [];
-    for (const rule of rules) {
-      const message = evaluate(rule, prices[rule.coin]);
-      if (message) fired.push({ rule: rule, message: message });
-      else results.push({ id: rule.id, fired: false });
-    }
+    const prices = await getPrices(coins.map(function (c) { return c.id; }));
+    const holder = await loadState();
+    const now = Date.now();
+    const alerts = [];
+    const report = [];
 
-    if (fired.length) {
-      const text = fired.map(function (f) { return f.message; }).join(' ');
-      const cooldown = Math.min.apply(null, fired.map(function (f) { return f.rule.cooldownMinutes; }));
-      const ids = fired.map(function (f) { return f.rule.id; });
-      if (dry) {
-        results.push({ ids: ids, fired: true, called: false, dry: true, message: text });
-      } else if (await recentlyCalled(cooldown)) {
-        results.push({ ids: ids, fired: true, called: false, reason: 'cooldown' });
-      } else {
-        await placeCall(text);
-        results.push({ ids: ids, fired: true, called: true });
+    for (const coin of coins) {
+      const price = prices[coin.id] && prices[coin.id].usd;
+      if (typeof price !== 'number') { report.push({ coin: coin.symbol, error: 'no price' }); continue; }
+      const st = holder.data.coins[coin.id] || { lastPrice: null, levels: {} };
+      const crossed = typeof st.lastPrice === 'number' ? crossedLevels(coin, st.lastPrice, price) : [];
+      const eligible = crossed.filter(function (l) { return !(st.levels[l] && now - st.levels[l] < cooldownMs); });
+
+      if (eligible.length) {
+        const lowest = Math.min.apply(null, eligible);
+        alerts.push({ text: coin.name + ' dropped below ' + fmt(lowest) + ' dollars. Now ' + fmt(price) + '.', coin: coin.symbol, levels: eligible });
+        eligible.forEach(function (l) { st.levels[l] = now; });
       }
+      Object.keys(st.levels).forEach(function (l) { if (now - st.levels[l] > 48 * 3600 * 1000) delete st.levels[l]; });
+      st.lastPrice = price;
+      holder.data.coins[coin.id] = st;
+      report.push({ coin: coin.symbol, price: price, crossed: crossed, alerted: eligible });
     }
-    return res.status(200).json({ ok: true, checked: rules.length, results: results });
+
+    if (dry) return res.status(200).json({ ok: true, dry: true, report: report, wouldCall: alerts.map(function (a) { return a.text; }) });
+
+    if (!alerts.length) {
+      await saveState(holder);
+      return res.status(200).json({ ok: true, report: report });
+    }
+
+    // Alert: first call, then save state (so a retry cannot repeat the alert), then the remaining calls.
+    const text = alerts.map(function (a) { return a.text; }).join(' ');
+    let sid = await placeCall(text);
+    await saveState(holder);
+    for (let i = 1; i < calls; i++) {
+      await waitForCall(sid);
+      await sleep(3000);
+      sid = await placeCall(text);
+    }
+    return res.status(200).json({ ok: true, called: calls, report: report });
   } catch (err) {
     return res.status(500).json({ error: String(err.message || err) });
   }
