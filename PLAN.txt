@@ -1,0 +1,61 @@
+CRYPTO ALERT SYSTEM - PLAN
+Version: 1.0
+
+GOAL
+Send SMS alerts (via Twilio) when crypto prices meet conditions I define.
+Hosted on Vercel, code in this repo (anandalev/alert-system), deployed from main.
+
+SECRETS (Vercel environment variables, never committed to git)
+- TWILIO_ACCOUNT_SID
+- TWILIO_AUTH_TOKEN
+- TWILIO_FROM_NUMBER   (Twilio sending number)
+- ALERT_TO_NUMBER      (phone number that receives alerts)
+Note: the Auth Token was shared in a chat, so rotate it in the Twilio console.
+
+ARCHITECTURE
+1. Price source: a public price API (CoinGecko or Binance public endpoints), no API key needed to start.
+2. Checker: a Vercel serverless function (api/check.js) that
+   - fetches current prices for the watched coins
+   - evaluates each rule in the alert config
+   - sends an SMS through Twilio when a rule fires
+3. Scheduler: a cron trigger that calls the checker. Options:
+   - Vercel Cron (free plan: once per day at most; Pro: down to every minute)
+   - External free pinger (cron-job.org or GitHub Actions every 5 minutes) calling the endpoint with a secret header
+4. State: a small store so the same alert is not sent repeatedly (cooldown / already-fired flag).
+   Options: Supabase table (already in use for YouTantra) or Vercel KV.
+5. Config: alerts.json in the repo listing coins and rules (easy to edit, no UI needed at first).
+
+ALERT RULE TYPES (start simple)
+- Price above X
+- Price below X
+- Percent change of N% within T minutes/hours
+Each rule has: coin, type, threshold, cooldown (minutes), enabled flag.
+
+SMS FORMAT
+Short and clear, for example:
+"BTC crossed above 100,000 USD (now 100,230). Rule: price above 100000."
+
+BUILD STEPS
+1. Scaffold the repo: package.json, api/check.js, alerts.json, README.
+2. Price fetch module with error handling and retries.
+3. Rule evaluation module.
+4. Twilio send module.
+5. Cooldown / dedupe state.
+6. Protect the endpoint with a secret token so only the scheduler can call it.
+7. Import the repo into Vercel, add the environment variables, deploy from main.
+8. Set up the scheduler.
+9. Test with a low threshold so an alert fires, confirm the SMS arrives.
+10. Check the Vercel deployment status and runtime logs after each push.
+
+OPEN QUESTIONS
+- Which coins to watch?
+- Which rule types and thresholds?
+- How often should prices be checked?
+- Twilio sending number and destination number?
+- Is the Vercel plan free or Pro (decides the scheduler)?
+- Any second channel later (WhatsApp, email, Telegram)?
+
+LATER IDEAS
+- Simple web page to add/edit alerts
+- Daily summary SMS
+- Support for WhatsApp via Twilio
