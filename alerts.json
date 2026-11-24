@@ -1,0 +1,8 @@
+{
+  "rules": [
+    { "id": "btc-24h-move", "coin": "bitcoin", "symbol": "BTC", "type": "change24h", "threshold": 7, "cooldownMinutes": 360, "enabled": true },
+    { "id": "eth-24h-move", "coin": "ethereum", "symbol": "ETH", "type": "change24h", "threshold": 7, "cooldownMinutes": 360, "enabled": true },
+    { "id": "btc-above", "coin": "bitcoin", "symbol": "BTC", "type": "above", "threshold": 150000, "cooldownMinutes": 720, "enabled": false },
+    { "id": "btc-below", "coin": "bitcoin", "symbol": "BTC", "type": "below", "threshold": 60000, "cooldownMinutes": 720, "enabled": false }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "alert-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Crypto price alerts sent by SMS through Twilio",
+  "engines": { "node": ">=18" }
+}
