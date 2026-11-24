@@ -1,5 +1,5 @@
 // alert-system api/check.js
-// Version: 2.8
+// Version: 2.9
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
@@ -142,7 +142,7 @@ function israelTime(ms) {
   return new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem', dateStyle: 'medium', timeStyle: 'short' }) + ' (Israel)';
 }
 
-async function sendEmail(items, now) {
+async function sendEmail(items, current, now) {
   const key = process.env.MAILERSEND_API_KEY;
   const from = process.env.MAILERSEND_FROM;
   const to = config.settings.alertEmail;
@@ -158,9 +158,15 @@ async function sendEmail(items, now) {
       'Last time this level was crossed: ' + (i.previous ? israelTime(i.previous) : 'NONE')
     ].join('\n');
   });
-  const text = lines.join('\n\n');
+  const priceLines = current.map(function (c) { return c.symbol + ': ' + c.price + ' USD'; });
+  const sections = ['ALERTS'].concat(lines).concat(['CURRENT PRICES\n' + priceLines.join('\n')]);
+  const text = sections.join('\n\n');
+  const esc = function (t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;'); };
   const html = '<div style="font-family:Arial,sans-serif;font-size:15px">' +
-    lines.map(function (l) { return '<p>' + l.replace(/&/g, '&amp;').replace(/</g, '&lt;').split('\n').join('<br>') + '</p>'; }).join('') + '</div>';
+    '<h3 style="margin:0 0 8px">Alerts</h3>' +
+    lines.map(function (l) { return '<p>' + esc(l).split('\n').join('<br>') + '</p>'; }).join('') +
+    '<h3 style="margin:16px 0 8px">Current prices</h3>' +
+    '<p>' + priceLines.map(esc).join('<br>') + '</p></div>';
   const res = await fetch('https://api.mailersend.com/v1/email', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
@@ -199,11 +205,13 @@ module.exports = async function handler(req, res) {
     const now = Date.now();
     const alerts = [];
     const emailItems = [];
+    const current = [];
     const report = [];
 
     for (const coin of coins) {
       const price = prices[coin.id] && prices[coin.id].usd;
-      if (typeof price !== 'number') { report.push({ coin: coin.symbol, error: 'no price' }); continue; }
+      if (typeof price !== 'number') { report.push({ coin: coin.symbol, error: 'no price' }); current.push({ symbol: coin.symbol, price: 'unavailable' }); continue; }
+      current.push({ symbol: coin.symbol, price: fmtPrice(price) });
       const st = holder.data.coins[coin.id] || { lastPrice: null, levels: {} };
       if (!st.lastCrossed) st.lastCrossed = Object.assign({}, st.levels);
       const prev = typeof st.lastPrice === 'number' ? st.lastPrice : (typeof coin.seedPrice === 'number' ? coin.seedPrice : null);
@@ -245,7 +253,7 @@ module.exports = async function handler(req, res) {
     await saveState(holder);
     let email;
     try {
-      email = await sendEmail(emailItems, now);
+      email = await sendEmail(emailItems, current, now);
     } catch (e) {
       email = 'failed: ' + String(e.message || e);
       console.error('[alert-check] email ' + email);
