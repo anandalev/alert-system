@@ -1,5 +1,5 @@
 // alert-system api/check.js
-// Version: 2.9
+// Version: 3.0
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
@@ -9,6 +9,11 @@
 // A coin may have an optional "seedPrice" in alerts.json: it is used as the previous price only
 // while no saved price exists yet (set it to the threshold so a coin already below it alerts on its
 // first run). Levels are rounded to the decimals of delta, so 0.95 - 0.05 is exactly 0.90.
+//
+// Resets: resets.json holds reset requests. Each request with a new "id" is applied once, on the next
+// run: it clears the cooldown and "last crossed" times of a coin (or ALL coins), optionally of one
+// level only, and can set lastPrice so levels already below the price alert on the next run.
+// See README.md for the format.
 //
 // Every alert also sends one email through MailerSend to settings.alertEmail, with coin, level,
 // price and the previous time that level was crossed (NONE if never). The email is best effort:
@@ -20,6 +25,7 @@
 // Add ?dry=1 to the URL to evaluate without placing calls or saving state.
 
 const config = require('../alerts.json');
+const resetFile = require('../resets.json');
 const { put, get } = require('@vercel/blob');
 
 const STATE_FILE = 'alert-state.json';
@@ -182,6 +188,33 @@ async function sendEmail(items, current, now) {
   return 'sent';
 }
 
+function applyResets(holder, applied) {
+  const done = holder.data.appliedResets || [];
+  (resetFile.resets || []).forEach(function (r) {
+    if (!r || !r.id || done.indexOf(r.id) !== -1) return;
+    const target = String(r.coin || 'ALL').toUpperCase();
+    config.coins.forEach(function (coin) {
+      if (target !== 'ALL' && target !== coin.symbol.toUpperCase()) return;
+      const st = holder.data.coins[coin.id] || { lastPrice: null, levels: {}, lastCrossed: {} };
+      st.levels = st.levels || {};
+      st.lastCrossed = st.lastCrossed || {};
+      if (r.level === undefined || r.level === null || r.level === 'ALL') {
+        st.levels = {};
+        st.lastCrossed = {};
+      } else {
+        const key = String(roundTo(Number(r.level), decimalsOf(coin.delta || 1)));
+        delete st.levels[key];
+        delete st.lastCrossed[key];
+      }
+      if (typeof r.lastPrice === 'number') st.lastPrice = r.lastPrice;
+      holder.data.coins[coin.id] = st;
+    });
+    done.push(r.id);
+    applied.push(r.id);
+  });
+  holder.data.appliedResets = done;
+}
+
 module.exports = async function handler(req, res) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return res.status(500).json({ error: 'CRON_SECRET is not set' });
@@ -202,6 +235,8 @@ module.exports = async function handler(req, res) {
 
     const prices = await getPrices(coins.map(function (c) { return c.id; }));
     const holder = await loadState();
+    const appliedResets = [];
+    applyResets(holder, appliedResets);
     const now = Date.now();
     const alerts = [];
     const emailItems = [];
@@ -239,6 +274,7 @@ module.exports = async function handler(req, res) {
       report.push({ coin: coin.symbol, price: price, crossed: crossed, alerted: eligible });
     }
 
+    if (appliedResets.length) console.log('[alert-check] ' + (dry ? 'dry ' : '') + 'resets applied: ' + appliedResets.join(', '));
     console.log('[alert-check] ' + (dry ? 'dry ' : '') + JSON.stringify(report));
     if (dry) return res.status(200).json({ ok: true, dry: true, report: report, wouldCall: alerts.map(function (a) { return a.text; }), wouldEmail: emailItems });
 
