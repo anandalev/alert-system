@@ -1,5 +1,5 @@
 // alert-system api/check.js
-// Version: 2.5
+// Version: 2.6
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
@@ -9,7 +9,12 @@
 // A coin may have an optional "seedPrice" in alerts.json: it is used as the previous price only
 // while no saved price exists yet.
 //
+// Every alert also sends one email through MailerSend to settings.alertEmail, with coin, level,
+// price and the previous time that level was crossed (NONE if never). The email is best effort:
+// if it fails, the calls still go out.
+//
 // Required env vars:
+//   MAILERSEND_API_KEY, MAILERSEND_FROM (an address on a domain verified in MailerSend),
 //   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, ALERT_TO_NUMBER, CRON_SECRET
 // Add ?dry=1 to the URL to evaluate without placing calls or saving state.
 
@@ -101,6 +106,43 @@ async function waitForCall(callSid) {
   }
 }
 
+function israelTime(ms) {
+  return new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem', dateStyle: 'medium', timeStyle: 'short' }) + ' (Israel)';
+}
+
+async function sendEmail(items, now) {
+  const key = process.env.MAILERSEND_API_KEY;
+  const from = process.env.MAILERSEND_FROM;
+  const to = config.settings.alertEmail;
+  if (!key || !from || !to) return 'skipped: missing MAILERSEND_API_KEY, MAILERSEND_FROM or alertEmail';
+  const subject = items.map(function (i) { return i.symbol + ' crossed below ' + fmt(i.level); }).join(', ');
+  const lines = items.map(function (i) {
+    return [
+      'Coin: ' + i.name + ' (' + i.symbol + ')',
+      'Level crossed: ' + fmt(i.level) + ' USD',
+      'Current price: ' + fmt(i.price) + ' USD',
+      'Crossed at: ' + israelTime(now),
+      'Last time this level was crossed: ' + (i.previous ? israelTime(i.previous) : 'NONE')
+    ].join('\n');
+  });
+  const text = lines.join('\n\n');
+  const html = '<div style="font-family:Arial,sans-serif;font-size:15px">' +
+    lines.map(function (l) { return '<p>' + l.replace(/&/g, '&amp;').replace(/</g, '&lt;').split('\n').join('<br>') + '</p>'; }).join('') + '</div>';
+  const res = await fetch('https://api.mailersend.com/v1/email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+    body: JSON.stringify({
+      from: { email: from, name: 'Crypto Alerts' },
+      to: [{ email: to }],
+      subject: 'Crypto alert: ' + subject,
+      text: text,
+      html: html
+    })
+  });
+  if (!res.ok) throw new Error('MailerSend error ' + res.status + ' ' + (await res.text()));
+  return 'sent';
+}
+
 module.exports = async function handler(req, res) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return res.status(500).json({ error: 'CRON_SECRET is not set' });
@@ -123,12 +165,14 @@ module.exports = async function handler(req, res) {
     const holder = await loadState();
     const now = Date.now();
     const alerts = [];
+    const emailItems = [];
     const report = [];
 
     for (const coin of coins) {
       const price = prices[coin.id] && prices[coin.id].usd;
       if (typeof price !== 'number') { report.push({ coin: coin.symbol, error: 'no price' }); continue; }
       const st = holder.data.coins[coin.id] || { lastPrice: null, levels: {} };
+      if (!st.lastCrossed) st.lastCrossed = Object.assign({}, st.levels);
       const prev = typeof st.lastPrice === 'number' ? st.lastPrice : (typeof coin.seedPrice === 'number' ? coin.seedPrice : null);
       const crossed = prev !== null ? crossedLevels(coin, prev, price) : [];
       const eligible = crossed.filter(function (l) { return !(st.levels[l] && now - st.levels[l] < cooldownMs); });
@@ -136,8 +180,12 @@ module.exports = async function handler(req, res) {
       if (eligible.length) {
         const lowest = Math.min.apply(null, eligible);
         alerts.push({ text: coin.name + ' dropped below ' + fmt(lowest) + ' dollars. Now ' + fmt(price) + '.', coin: coin.symbol, levels: eligible });
-        eligible.forEach(function (l) { st.levels[l] = now; });
+        eligible.forEach(function (l) {
+          emailItems.push({ name: coin.name, symbol: coin.symbol, level: l, price: price, previous: st.lastCrossed[l] || null });
+          st.levels[l] = now;
+        });
       }
+      crossed.forEach(function (l) { st.lastCrossed[l] = now; });
       Object.keys(st.levels).forEach(function (l) { if (now - st.levels[l] > 48 * 3600 * 1000) delete st.levels[l]; });
       st.lastPrice = price;
       holder.data.coins[coin.id] = st;
@@ -145,7 +193,7 @@ module.exports = async function handler(req, res) {
     }
 
     console.log('[alert-check] ' + (dry ? 'dry ' : '') + JSON.stringify(report));
-    if (dry) return res.status(200).json({ ok: true, dry: true, report: report, wouldCall: alerts.map(function (a) { return a.text; }) });
+    if (dry) return res.status(200).json({ ok: true, dry: true, report: report, wouldCall: alerts.map(function (a) { return a.text; }), wouldEmail: emailItems });
 
     if (!alerts.length) {
       await saveState(holder);
@@ -156,12 +204,19 @@ module.exports = async function handler(req, res) {
     const text = alerts.map(function (a) { return a.text; }).join(' ');
     let sid = await placeCall(text);
     await saveState(holder);
+    let email;
+    try {
+      email = await sendEmail(emailItems, now);
+    } catch (e) {
+      email = 'failed: ' + String(e.message || e);
+      console.error('[alert-check] email ' + email);
+    }
     for (let i = 1; i < calls; i++) {
       await waitForCall(sid);
       await sleep(3000);
       sid = await placeCall(text);
     }
-    return res.status(200).json({ ok: true, called: calls, report: report });
+    return res.status(200).json({ ok: true, called: calls, email: email, report: report });
   } catch (err) {
     console.error('[alert-check] error ' + String(err.message || err));
     return res.status(500).json({ error: String(err.message || err) });

@@ -1,7 +1,8 @@
 {
   "settings": {
     "cooldownHours": 8,
-    "callsPerAlert": 2
+    "callsPerAlert": 2,
+    "alertEmail": "anandapmg@gmail.com"
   },
   "coins": [
     { "id": "bitcoin", "name": "Bitcoin", "symbol": "BTC", "threshold": 60000, "delta": 2000, "enabled": true },
