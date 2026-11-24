@@ -1,20 +1,20 @@
 // alert-system api/check.js
-// Version: 2.1
+// Version: 2.2
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
 // Each level alerts at most once per cooldownHours. The last price and the last alert time of each
-// level are kept in one JSON file in a Vercel Blob store (needs BLOB_READ_WRITE_TOKEN, which Vercel
-// adds automatically when a Blob store is connected to the project).
+// level are kept in one JSON file in a private Vercel Blob store (the store is connected to the project,
+// so Vercel adds BLOB_READ_WRITE_TOKEN and BLOB_STORE_ID automatically).
 // A coin may have an optional "seedPrice" in alerts.json: it is used as the previous price only
 // while no saved price exists yet.
 //
 // Required env vars:
-//   BLOB_READ_WRITE_TOKEN, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, ALERT_TO_NUMBER, CRON_SECRET
+//   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, ALERT_TO_NUMBER, CRON_SECRET
 // Add ?dry=1 to the URL to evaluate without placing calls or saving state.
 
 const config = require('../alerts.json');
-const { put, list } = require('@vercel/blob');
+const { put, get } = require('@vercel/blob');
 
 const STATE_FILE = 'alert-state.json';
 const API = 'https://api.twilio.com/2010-04-01/Accounts/';
@@ -41,21 +41,18 @@ async function getPrices(ids) {
 }
 
 async function loadState() {
-  const found = await list({ prefix: STATE_FILE, limit: 1 });
-  if (!found.blobs.length) return { data: { coins: {} } };
-  const res = await fetch(found.blobs[0].url + '?t=' + Date.now(), { cache: 'no-store' });
-  if (!res.ok) throw new Error('State read error ' + res.status);
-  const data = await res.json();
+  const result = await get(STATE_FILE, { access: 'private', useCache: false });
+  if (!result || result.statusCode !== 200) return { data: { coins: {} } };
+  const data = await new Response(result.stream).json();
   return { data: data && data.coins ? data : { coins: {} } };
 }
 
 async function saveState(holder) {
   await put(STATE_FILE, JSON.stringify(holder.data), {
-    access: 'public',
+    access: 'private',
     addRandomSuffix: false,
     allowOverwrite: true,
-    contentType: 'application/json',
-    cacheControlMaxAge: 60
+    contentType: 'application/json'
   });
 }
 
@@ -111,7 +108,7 @@ module.exports = async function handler(req, res) {
   if (req.headers.authorization !== 'Bearer ' + secret) return res.status(401).json({ error: 'unauthorized' });
 
   const dry = req.query && req.query.dry === '1';
-  const required = ['BLOB_READ_WRITE_TOKEN', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'ALERT_TO_NUMBER'];
+  const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'ALERT_TO_NUMBER'];
   const missing = required.filter(function (k) { return !process.env[k]; });
   if (missing.length) return res.status(500).json({ error: 'missing env vars', missing: missing });
 
