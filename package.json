@@ -1,6 +1,6 @@
 {
   "name": "alert-system",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "private": true,
   "description": "Crypto price alerts delivered by Twilio voice call",
   "engines": { "node": ">=18" },

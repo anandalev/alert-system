@@ -1,5 +1,5 @@
 // alert-system api/check.js
-// Version: 2.2
+// Version: 2.3
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
@@ -70,20 +70,20 @@ function fmt(n) {
   return Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
 
-function escapeXml(t) {
-  return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function baseUrl() {
+  const host = process.env.VERCEL_PROJECT_PRODUCTION_URL || 'alert-system-iota.vercel.app';
+  return 'https://' + host;
 }
 
 async function placeCall(text) {
-  const say = escapeXml(text);
-  const twiml = '<Response><Say voice="alice">Crypto alert. ' + say + '</Say><Pause length="1"/><Say voice="alice">' + say + '</Say></Response>';
   const res = await fetch(API + process.env.TWILIO_ACCOUNT_SID + '/Calls.json', {
     method: 'POST',
     headers: formHeaders(),
     body: new URLSearchParams({
       To: process.env.ALERT_TO_NUMBER,
       From: process.env.TWILIO_FROM_NUMBER,
-      Twiml: twiml
+      Url: baseUrl() + '/api/twiml?text=' + encodeURIComponent(text),
+      Method: 'GET'
     }).toString()
   });
   if (!res.ok) throw new Error('Twilio call error ' + res.status + ' ' + (await res.text()));
