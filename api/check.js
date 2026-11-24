@@ -1,5 +1,5 @@
 // alert-system api/check.js
-// Version: 2.6
+// Version: 2.7
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
@@ -7,7 +7,8 @@
 // level are kept in one JSON file in a private Vercel Blob store (the store is connected to the project,
 // so Vercel adds BLOB_READ_WRITE_TOKEN and BLOB_STORE_ID automatically).
 // A coin may have an optional "seedPrice" in alerts.json: it is used as the previous price only
-// while no saved price exists yet.
+// while no saved price exists yet (set it to the threshold so a coin already below it alerts on its
+// first run). Levels are rounded to the decimals of delta, so 0.95 - 0.05 is exactly 0.90.
 //
 // Every alert also sends one email through MailerSend to settings.alertEmail, with coin, level,
 // price and the previous time that level was crossed (NONE if never). The email is best effort:
@@ -61,18 +62,35 @@ async function saveState(holder) {
   });
 }
 
+function decimalsOf(n) {
+  const t = String(n);
+  return t.indexOf('.') === -1 ? 0 : t.length - t.indexOf('.') - 1;
+}
+
+function roundTo(n, d) {
+  const f = Math.pow(10, d);
+  return Math.round(n * f) / f;
+}
+
 // Levels that the price crossed downward since the previous check.
 function crossedLevels(coin, prev, price) {
   const out = [];
   for (let n = 0; coin.threshold - n * coin.delta > 0 && n < 2000; n++) {
-    const level = coin.threshold - n * coin.delta;
+    const level = roundTo(coin.threshold - n * coin.delta, decimalsOf(coin.delta));
     if (prev >= level && price < level) out.push(level);
   }
   return out;
 }
 
-function fmt(n) {
-  return Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+function fmt(n, decimals) {
+  const d = typeof decimals === 'number' ? decimals : 0;
+  return Number(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+// Price display: whole dollars above 1,000, otherwise enough decimals to be useful.
+function fmtPrice(n) {
+  const a = Math.abs(n);
+  return fmt(n, a >= 1000 ? 0 : a >= 10 ? 2 : 4);
 }
 
 function baseUrl() {
@@ -115,12 +133,12 @@ async function sendEmail(items, now) {
   const from = process.env.MAILERSEND_FROM;
   const to = config.settings.alertEmail;
   if (!key || !from || !to) return 'skipped: missing MAILERSEND_API_KEY, MAILERSEND_FROM or alertEmail';
-  const subject = items.map(function (i) { return i.symbol + ' crossed below ' + fmt(i.level); }).join(', ');
+  const subject = items.map(function (i) { return i.symbol + ' crossed below ' + i.level; }).join(', ');
   const lines = items.map(function (i) {
     return [
       'Coin: ' + i.name + ' (' + i.symbol + ')',
-      'Level crossed: ' + fmt(i.level) + ' USD',
-      'Current price: ' + fmt(i.price) + ' USD',
+      'Level crossed: ' + i.level + ' USD',
+      'Current price: ' + i.price + ' USD',
       'Crossed at: ' + israelTime(now),
       'Last time this level was crossed: ' + (i.previous ? israelTime(i.previous) : 'NONE')
     ].join('\n');
@@ -179,9 +197,10 @@ module.exports = async function handler(req, res) {
 
       if (eligible.length) {
         const lowest = Math.min.apply(null, eligible);
-        alerts.push({ text: coin.name + ' dropped below ' + fmt(lowest) + ' dollars. Now ' + fmt(price) + '.', coin: coin.symbol, levels: eligible });
+        const ld = decimalsOf(coin.delta);
+        alerts.push({ text: (coin.spoken || coin.name) + ' dropped below ' + fmt(lowest, ld) + ' dollars. Now ' + fmtPrice(price) + '.', coin: coin.symbol, levels: eligible });
         eligible.forEach(function (l) {
-          emailItems.push({ name: coin.name, symbol: coin.symbol, level: l, price: price, previous: st.lastCrossed[l] || null });
+          emailItems.push({ name: coin.name, symbol: coin.symbol, level: fmt(l, ld), price: fmtPrice(price), previous: st.lastCrossed[l] || null });
           st.levels[l] = now;
         });
       }
