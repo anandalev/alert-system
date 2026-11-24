@@ -1,5 +1,5 @@
 // alert-system api/check.js
-// Version: 2.4
+// Version: 2.5
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
@@ -144,6 +144,7 @@ module.exports = async function handler(req, res) {
       report.push({ coin: coin.symbol, price: price, crossed: crossed, alerted: eligible });
     }
 
+    console.log('[alert-check] ' + (dry ? 'dry ' : '') + JSON.stringify(report));
     if (dry) return res.status(200).json({ ok: true, dry: true, report: report, wouldCall: alerts.map(function (a) { return a.text; }) });
 
     if (!alerts.length) {
@@ -162,6 +163,7 @@ module.exports = async function handler(req, res) {
     }
     return res.status(200).json({ ok: true, called: calls, report: report });
   } catch (err) {
+    console.error('[alert-check] error ' + String(err.message || err));
     return res.status(500).json({ error: String(err.message || err) });
   }
 };
