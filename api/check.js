@@ -1,5 +1,5 @@
 // alert-system api/check.js
-// Version: 2.7
+// Version: 2.8
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
@@ -72,6 +72,20 @@ function roundTo(n, d) {
   return Math.round(n * f) / f;
 }
 
+// Highest level below the current price that is not in its cooldown window, so it can trigger the
+// next alert. Returns null when no level above 0 is left.
+function nextAlertLevel(coin, st, price, now, cooldownMs) {
+  const d = decimalsOf(coin.delta);
+  for (let n = 0; n < 2000; n++) {
+    const level = roundTo(coin.threshold - n * coin.delta, d);
+    if (level <= 0) return null;
+    if (level >= price) continue;
+    if (st.levels[level] && now - st.levels[level] < cooldownMs) continue;
+    return level;
+  }
+  return null;
+}
+
 // Levels that the price crossed downward since the previous check.
 function crossedLevels(coin, prev, price) {
   const out = [];
@@ -139,6 +153,7 @@ async function sendEmail(items, now) {
       'Coin: ' + i.name + ' (' + i.symbol + ')',
       'Level crossed: ' + i.level + ' USD',
       'Current price: ' + i.price + ' USD',
+      'Next alert level: ' + i.next,
       'Crossed at: ' + israelTime(now),
       'Last time this level was crossed: ' + (i.previous ? israelTime(i.previous) : 'NONE')
     ].join('\n');
@@ -199,9 +214,14 @@ module.exports = async function handler(req, res) {
         const lowest = Math.min.apply(null, eligible);
         const ld = decimalsOf(coin.delta);
         alerts.push({ text: (coin.spoken || coin.name) + ' dropped below ' + fmt(lowest, ld) + ' dollars. Now ' + fmtPrice(price) + '.', coin: coin.symbol, levels: eligible });
+        const previous = {};
         eligible.forEach(function (l) {
-          emailItems.push({ name: coin.name, symbol: coin.symbol, level: fmt(l, ld), price: fmtPrice(price), previous: st.lastCrossed[l] || null });
+          previous[l] = st.lastCrossed[l] || null;
           st.levels[l] = now;
+        });
+        const next = nextAlertLevel(coin, st, price, now, cooldownMs);
+        eligible.forEach(function (l) {
+          emailItems.push({ name: coin.name, symbol: coin.symbol, level: fmt(l, ld), price: fmtPrice(price), previous: previous[l], next: next === null ? 'NONE' : fmt(next, ld) + ' USD' });
         });
       }
       crossed.forEach(function (l) { st.lastCrossed[l] = now; });
