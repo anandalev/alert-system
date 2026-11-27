@@ -1,5 +1,5 @@
 // alert-system api/check.js
-// Version: 3.0
+// Version: 3.1
 // Runs every 5 minutes (Vercel Cron, see vercel.json).
 // For each enabled coin in alerts.json it places 2 Twilio voice calls when the price crosses DOWN
 // through a level. Levels are: threshold, threshold - delta, threshold - 2*delta, ... (always above 0).
@@ -14,6 +14,11 @@
 // run: it clears the cooldown and "last crossed" times of a coin (or ALL coins), optionally of one
 // level only, and can set lastPrice so levels already below the price alert on the next run.
 // See README.md for the format.
+//
+// Quiet hours: settings.quietHours (timezone, startHour, endHour) defines a nightly window (Israel time,
+// 23:00 to 07:00). Inside it a coin that has "quietBelow" only alerts while its current price is below
+// that value; all other crossings are skipped (no call, no email, no cooldown). Outside the window,
+// or for a coin without "quietBelow", nothing changes.
 //
 // Every alert also sends one email through MailerSend to settings.alertEmail, with coin, level,
 // price and the previous time that level was crossed (NONE if never). The email is best effort:
@@ -100,6 +105,14 @@ function crossedLevels(coin, prev, price) {
     if (prev >= level && price < level) out.push(level);
   }
   return out;
+}
+
+// True while the current time is inside the nightly quiet window from alerts.json.
+function inQuietHours(now) {
+  const q = config.settings.quietHours;
+  if (!q) return false;
+  const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: q.timezone || 'Asia/Jerusalem', hour: '2-digit', hourCycle: 'h23' }).format(new Date(now)));
+  return q.startHour > q.endHour ? (hour >= q.startHour || hour < q.endHour) : (hour >= q.startHour && hour < q.endHour);
 }
 
 function fmt(n, decimals) {
@@ -238,6 +251,7 @@ module.exports = async function handler(req, res) {
     const appliedResets = [];
     applyResets(holder, appliedResets);
     const now = Date.now();
+    const quiet = inQuietHours(now);
     const alerts = [];
     const emailItems = [];
     const current = [];
@@ -251,7 +265,8 @@ module.exports = async function handler(req, res) {
       if (!st.lastCrossed) st.lastCrossed = Object.assign({}, st.levels);
       const prev = typeof st.lastPrice === 'number' ? st.lastPrice : (typeof coin.seedPrice === 'number' ? coin.seedPrice : null);
       const crossed = prev !== null ? crossedLevels(coin, prev, price) : [];
-      const eligible = crossed.filter(function (l) { return !(st.levels[l] && now - st.levels[l] < cooldownMs); });
+      const muted = quiet && typeof coin.quietBelow === 'number' && !(price < coin.quietBelow);
+      const eligible = muted ? [] : crossed.filter(function (l) { return !(st.levels[l] && now - st.levels[l] < cooldownMs); });
 
       if (eligible.length) {
         const lowest = Math.min.apply(null, eligible);
@@ -271,7 +286,7 @@ module.exports = async function handler(req, res) {
       Object.keys(st.levels).forEach(function (l) { if (now - st.levels[l] > 48 * 3600 * 1000) delete st.levels[l]; });
       st.lastPrice = price;
       holder.data.coins[coin.id] = st;
-      report.push({ coin: coin.symbol, price: price, crossed: crossed, alerted: eligible });
+      report.push({ coin: coin.symbol, price: price, crossed: crossed, alerted: eligible, quietMuted: muted });
     }
 
     if (appliedResets.length) console.log('[alert-check] ' + (dry ? 'dry ' : '') + 'resets applied: ' + appliedResets.join(', '));

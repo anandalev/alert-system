@@ -1,6 +1,6 @@
 # Crypto alert system
 
-Version: 3.0
+Version: 3.1
 
 Checks crypto prices every 5 minutes (Vercel Cron) and alerts when a coin crosses DOWN through a level.
 An alert is 2 voice calls (Twilio) plus 1 email (MailerSend, from info@youtantra.com to the address in alerts.json).
@@ -16,6 +16,10 @@ An alert is 2 voice calls (Twilio) plus 1 email (MailerSend, from info@youtantra
 Each coin has `threshold` and `delta`. Levels are threshold, threshold - delta, threshold - 2*delta, ... (above 0).
 A level alerts when the price goes from at or above it to below it between two checks.
 Each level alerts at most once per `cooldownHours` (8). Several levels crossed together give one alert.
+
+## Quiet hours (23:00 to 07:00 Israel time)
+
+`settings.quietHours` in `alerts.json` defines the nightly window. In it, a coin with `quietBelow` alerts only while its current price is below that value (BTC 56000, SOL 60, XRP 0.8). Other crossings in the window are skipped completely (no call, no email, no cooldown). Outside the window all levels alert as usual.
 
 ## Resetting "last crossed" to re-activate alerts
 

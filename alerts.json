@@ -2,12 +2,13 @@
   "settings": {
     "cooldownHours": 8,
     "callsPerAlert": 2,
-    "alertEmail": "anandapmg@gmail.com"
+    "alertEmail": "anandapmg@gmail.com",
+    "quietHours": { "timezone": "Asia/Jerusalem", "startHour": 23, "endHour": 7 }
   },
   "coins": [
-    { "id": "bitcoin", "name": "Bitcoin", "symbol": "BTC", "threshold": 60000, "delta": 2000, "enabled": true },
-    { "id": "ripple", "name": "XRP", "spoken": "X R P", "symbol": "XRP", "threshold": 0.95, "delta": 0.05, "enabled": true },
-    { "id": "solana", "name": "Solana", "symbol": "SOL", "threshold": 70, "delta": 4, "enabled": true },
+    { "id": "bitcoin", "name": "Bitcoin", "symbol": "BTC", "threshold": 60000, "delta": 2000, "quietBelow": 56000, "enabled": true },
+    { "id": "ripple", "name": "XRP", "spoken": "X R P", "symbol": "XRP", "threshold": 0.95, "delta": 0.05, "quietBelow": 0.8, "enabled": true },
+    { "id": "solana", "name": "Solana", "symbol": "SOL", "threshold": 70, "delta": 4, "quietBelow": 60, "enabled": true },
     { "id": "ethereum", "name": "Ethereum", "symbol": "ETH", "threshold": null, "delta": null, "enabled": false }
   ]
 }
